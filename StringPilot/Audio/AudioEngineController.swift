@@ -23,9 +23,18 @@ final class AudioEngineController: ObservableObject {
     }
 
     private struct DetectionFocus {
+        let stringIndex: Int
         let minimumFrequency: Double
         let maximumFrequency: Double
         let expiresAt: TimeInterval
+    }
+
+    private struct PendingCapture {
+        let stringIndex: Int
+        let pitch: DetectedPitch
+        let sampleRate: Double
+        let completeAt: TimeInterval
+        var samples: [Float]
     }
 
     @Published private(set) var state: State = .stopped
@@ -44,8 +53,14 @@ final class AudioEngineController: ObservableObject {
     private let reverb = AVAudioUnitReverb()
     private var players: [AVAudioPlayerNode] = (0..<6).map { _ in AVAudioPlayerNode() }
     private let generator = PluckedStringGenerator()
+    private let capturedAttackProcessor = CapturedAttackProcessor()
+    private let capturedAttackLock = NSLock()
+    private var capturedAttacks: [Int: CapturedAttack] = [:]
     private let analysisQueue = DispatchQueue(label: "StringPilot.PitchAnalysis", qos: .userInteractive)
+    private let captureQueue = DispatchQueue(label: "StringPilot.AttackCapture", qos: .userInitiated)
     private var analysisBuffer: [Float] = []
+    private var focusedBuffer: [Float] = []
+    private var pendingCaptures: [PendingCapture] = []
     private var lastAnalysisTime: TimeInterval = 0
     private var pitchDetector = YINPitchDetector()
     private var detectionFocus: DetectionFocus?
@@ -69,6 +84,7 @@ final class AudioEngineController: ObservableObject {
     }
 
     func focusDetection(
+        stringIndex: Int,
         minimumFrequency: Double,
         maximumFrequency: Double,
         duration: TimeInterval = 0.24
@@ -76,13 +92,21 @@ final class AudioEngineController: ObservableObject {
         let minimum = max(20, min(minimumFrequency, maximumFrequency))
         let maximum = max(minimum, max(minimumFrequency, maximumFrequency))
         let focus = DetectionFocus(
+            stringIndex: stringIndex,
             minimumFrequency: minimum,
             maximumFrequency: maximum,
             expiresAt: ProcessInfo.processInfo.systemUptime + max(0.05, duration)
         )
         analysisQueue.async { [weak self] in
+            self?.focusedBuffer.removeAll(keepingCapacity: true)
             self?.detectionFocus = focus
         }
+    }
+
+    func clearCapturedAttacks() {
+        capturedAttackLock.lock()
+        capturedAttacks.removeAll()
+        capturedAttackLock.unlock()
     }
 
     func requestPermissionAndStart() async {
@@ -140,14 +164,31 @@ final class AudioEngineController: ObservableObject {
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else { return }
         let duration = palmMute > 0.7 ? 0.22 : 1.1
         seedCounter &+= 0x9E3779B97F4A7C15
-        let samples = generator.generate(.init(
+        let seed = seedCounter ^ UInt64(stringIndex + 1)
+        let model = generator.generate(.init(
             frequency: frequency,
             sampleRate: sampleRate,
             duration: duration,
             velocity: velocity,
             palmMute: palmMute,
-            seed: seedCounter ^ UInt64(stringIndex + 1)
+            seed: seed
         ))
+
+        let samples: [Float]
+        if let captured = capturedAttack(for: stringIndex) {
+            let realAttack = capturedAttackProcessor.render(
+                captured,
+                targetSampleRate: sampleRate,
+                targetFrequency: frequency,
+                frameCount: model.count,
+                velocity: velocity,
+                seed: seed
+            )
+            samples = capturedAttackProcessor.blend(model: model, captured: realAttack)
+        } else {
+            samples = model
+        }
+
         guard let buffer = AVAudioPCMBuffer(
             pcmFormat: format,
             frameCapacity: AVAudioFrameCount(samples.count)
@@ -224,9 +265,12 @@ final class AudioEngineController: ObservableObject {
         inputLevelDB = -120
         analysisQueue.sync {
             analysisBuffer.removeAll(keepingCapacity: true)
+            focusedBuffer.removeAll(keepingCapacity: true)
+            pendingCaptures.removeAll()
             lastAnalysisTime = 0
             detectionFocus = nil
         }
+        clearCapturedAttacks()
     }
 
     private func applyPreferredDevice(
@@ -270,6 +314,32 @@ final class AudioEngineController: ObservableObject {
         bands[2].bypass = false
     }
 
+    private func capturedAttack(for stringIndex: Int) -> CapturedAttack? {
+        capturedAttackLock.lock()
+        let attack = capturedAttacks[stringIndex]
+        capturedAttackLock.unlock()
+        return attack
+    }
+
+    private func storeCapturedAttack(
+        stringIndex: Int,
+        samples: [Float],
+        sampleRate: Double,
+        sourceFrequency: Double
+    ) {
+        captureQueue.async { [weak self] in
+            guard let self,
+                  let attack = self.capturedAttackProcessor.prepare(
+                    samples: samples,
+                    sampleRate: sampleRate,
+                    sourceFrequency: sourceFrequency
+                  ) else { return }
+            self.capturedAttackLock.lock()
+            self.capturedAttacks[stringIndex] = attack
+            self.capturedAttackLock.unlock()
+        }
+    }
+
     private func copyForAnalysis(buffer: AVAudioPCMBuffer, time: AVAudioTime) {
         guard let channels = buffer.floatChannelData else { return }
         let frameCount = Int(buffer.frameLength)
@@ -302,9 +372,26 @@ final class AudioEngineController: ObservableObject {
     ) {
         let amplified = samples.map { Float(Double($0) * gain) }
         analysisBuffer.append(contentsOf: amplified)
-        let maximumFrames = 8_192
-        if analysisBuffer.count > maximumFrames {
-            analysisBuffer.removeFirst(analysisBuffer.count - maximumFrames)
+        let maximumAnalysisFrames = 8_192
+        if analysisBuffer.count > maximumAnalysisFrames {
+            analysisBuffer.removeFirst(analysisBuffer.count - maximumAnalysisFrames)
+        }
+
+        if detectionFocus != nil {
+            focusedBuffer.append(contentsOf: amplified)
+            if focusedBuffer.count > maximumAnalysisFrames {
+                focusedBuffer.removeFirst(focusedBuffer.count - maximumAnalysisFrames)
+            }
+        }
+
+        let maximumCaptureFrames = max(2_048, Int(sampleRate * 0.30))
+        for index in pendingCaptures.indices {
+            pendingCaptures[index].samples.append(contentsOf: amplified)
+            if pendingCaptures[index].samples.count > maximumCaptureFrames {
+                pendingCaptures[index].samples.removeFirst(
+                    pendingCaptures[index].samples.count - maximumCaptureFrames
+                )
+            }
         }
 
         let rms = sqrt(amplified.reduce(0.0) { $0 + Double($1 * $1) } / Double(max(1, amplified.count)))
@@ -312,24 +399,30 @@ final class AudioEngineController: ObservableObject {
         DispatchQueue.main.async { [weak self] in self?.inputLevelDB = db }
 
         let now = ProcessInfo.processInfo.systemUptime
+        finalizeCaptures(at: now)
+
         if let focus = detectionFocus, now > focus.expiresAt {
             detectionFocus = nil
+            focusedBuffer.removeAll(keepingCapacity: true)
         }
         let focus = detectionFocus
         let analysisInterval = focus == nil ? 0.025 : 0.012
         guard timestamp - lastAnalysisTime >= analysisInterval else { return }
 
         let frameRequirement: Int
+        let sourceBuffer: [Float]
         if let focus {
             let cycles = 3.5
             frameRequirement = max(
                 1_024,
-                min(maximumFrames, Int(ceil(sampleRate / focus.minimumFrequency * cycles)))
+                min(maximumAnalysisFrames, Int(ceil(sampleRate / focus.minimumFrequency * cycles)))
             )
+            sourceBuffer = focusedBuffer
         } else {
             frameRequirement = 4_096
+            sourceBuffer = analysisBuffer
         }
-        guard analysisBuffer.count >= frameRequirement else { return }
+        guard sourceBuffer.count >= frameRequirement else { return }
         lastAnalysisTime = timestamp
 
         var detector = pitchDetector
@@ -339,15 +432,46 @@ final class AudioEngineController: ObservableObject {
             detector.maximumFrequency = min(2_200, focus.maximumFrequency * 1.12)
         }
         guard let pitch = detector.detect(
-            samples: Array(analysisBuffer.suffix(frameRequirement)),
+            samples: Array(sourceBuffer.suffix(frameRequirement)),
             sampleRate: sampleRate,
             timestamp: timestamp
         ) else { return }
+
+        if let focus {
+            pendingCaptures.append(PendingCapture(
+                stringIndex: focus.stringIndex,
+                pitch: pitch,
+                sampleRate: sampleRate,
+                completeAt: now + 0.065,
+                samples: focusedBuffer
+            ))
+            detectionFocus = nil
+            focusedBuffer.removeAll(keepingCapacity: true)
+        }
 
         DispatchQueue.main.async { [weak self] in
             self?.latestPitch = pitch
             self?.onPitch?(pitch)
         }
+    }
+
+    private func finalizeCaptures(at time: TimeInterval) {
+        guard !pendingCaptures.isEmpty else { return }
+        var remaining: [PendingCapture] = []
+        remaining.reserveCapacity(pendingCaptures.count)
+        for capture in pendingCaptures {
+            if time >= capture.completeAt {
+                storeCapturedAttack(
+                    stringIndex: capture.stringIndex,
+                    samples: capture.samples,
+                    sampleRate: capture.sampleRate,
+                    sourceFrequency: capture.pitch.frequency
+                )
+            } else {
+                remaining.append(capture)
+            }
+        }
+        pendingCaptures = remaining
     }
 }
 
