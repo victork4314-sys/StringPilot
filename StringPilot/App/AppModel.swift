@@ -80,6 +80,7 @@ final class AppModel: ObservableObject {
         stopPattern()
         releaseHeldStrings()
         stopActiveMIDINotes()
+        audio.clearCapturedAttacks()
         settingsStore.settings.profileID = id
         resetStringStates()
     }
@@ -126,6 +127,7 @@ final class AppModel: ObservableObject {
 
             let string = profile.strings[index]
             audio.focusDetection(
+                stringIndex: index,
                 minimumFrequency: string.openFrequency,
                 maximumFrequency: PitchMath.frequency(
                     forMIDINote: Double(string.openMIDINote + string.maximumFret)
