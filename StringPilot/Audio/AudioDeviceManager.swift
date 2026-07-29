@@ -1,4 +1,5 @@
 #if os(macOS)
+import Combine
 import CoreAudio
 import Foundation
 
@@ -12,9 +13,9 @@ struct AudioDevice: Identifiable, Hashable {
 
 @MainActor
 final class AudioDeviceManager: ObservableObject {
-    @Published private(set) var devices: [AudioDevice] = []
     @Published private(set) var defaultInputID: AudioDeviceID = 0
     @Published private(set) var defaultOutputID: AudioDeviceID = 0
+    @Published private(set) var devices: [AudioDevice] = []
     @Published private(set) var errorMessage: String?
 
     init() {
@@ -26,22 +27,34 @@ final class AudioDeviceManager: ObservableObject {
 
     func refresh() {
         do {
-            devices = try Self.readDevices()
-            defaultInputID = try Self.readDefaultDevice(selector: kAudioHardwarePropertyDefaultInputDevice)
-            defaultOutputID = try Self.readDefaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice)
+            let refreshed = try Self.readDevices()
+            let systemInput = try Self.readSystemDefaultDevice(selector: kAudioHardwarePropertyDefaultInputDevice)
+            let systemOutput = try Self.readSystemDefaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice)
+            devices = refreshed
+
+            if !refreshed.contains(where: { $0.id == defaultInputID && $0.hasInput }) {
+                defaultInputID = systemInput
+            }
+            if !refreshed.contains(where: { $0.id == defaultOutputID && $0.hasOutput }) {
+                defaultOutputID = systemOutput
+            }
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    func setDefaultInput(_ id: AudioDeviceID) throws {
-        try Self.setDefaultDevice(id, selector: kAudioHardwarePropertyDefaultInputDevice)
+    func selectInput(_ id: AudioDeviceID) throws {
+        guard devices.contains(where: { $0.id == id && $0.hasInput }) else {
+            throw AudioDeviceError.invalidInput(id)
+        }
         defaultInputID = id
     }
 
-    func setDefaultOutput(_ id: AudioDeviceID) throws {
-        try Self.setDefaultDevice(id, selector: kAudioHardwarePropertyDefaultOutputDevice)
+    func selectOutput(_ id: AudioDeviceID) throws {
+        guard devices.contains(where: { $0.id == id && $0.hasOutput }) else {
+            throw AudioDeviceError.invalidOutput(id)
+        }
         defaultOutputID = id
     }
 
@@ -98,7 +111,7 @@ final class AudioDeviceManager: ObservableObject {
         return status == noErr ? value as String : nil
     }
 
-    private static func readDefaultDevice(selector: AudioObjectPropertySelector) throws -> AudioDeviceID {
+    private static func readSystemDefaultDevice(selector: AudioObjectPropertySelector) throws -> AudioDeviceID {
         var address = AudioObjectPropertyAddress(
             mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -110,27 +123,22 @@ final class AudioDeviceManager: ObservableObject {
         return value
     }
 
-    private static func setDefaultDevice(_ id: AudioDeviceID, selector: AudioObjectPropertySelector) throws {
-        var address = AudioObjectPropertyAddress(
-            mSelector: selector,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var value = id
-        let size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        try check(AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, size, &value))
-    }
-
     private static func check(_ status: OSStatus) throws {
         guard status == noErr else { throw AudioDeviceError.osStatus(status) }
     }
 }
 
 enum AudioDeviceError: LocalizedError {
+    case invalidInput(AudioDeviceID)
+    case invalidOutput(AudioDeviceID)
     case osStatus(OSStatus)
 
     var errorDescription: String? {
         switch self {
+        case .invalidInput(let id):
+            return "Audio device \(id) is not available as an input."
+        case .invalidOutput(let id):
+            return "Audio device \(id) is not available as an output."
         case .osStatus(let status):
             return "Core Audio returned error \(status)."
         }

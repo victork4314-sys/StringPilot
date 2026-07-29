@@ -22,9 +22,12 @@ final class AppModel: ObservableObject {
     private let repeatScheduler = RepeatScheduler()
     private var cancellables: Set<AnyCancellable> = []
     private var heldStrings: Set<Int> = []
+    private var pendingInitialAttacks: [Int: DispatchWorkItem] = [:]
     private var captureStringIndex: Int?
+    private var captureWindowStarted: TimeInterval = 0
     private var captureWindowEnds = Date.distantPast
     private var activeMIDINotes: [Int: Int] = [:]
+    private var lastSendMIDIEnabled: Bool
 
     var settings: AppSettings { settingsStore.settings }
 
@@ -35,11 +38,20 @@ final class AppModel: ObservableObject {
     static let directButtons: [XboxInput] = [.a, .b, .x, .y, .leftShoulder, .rightShoulder]
 
     init() {
+        lastSendMIDIEnabled = settingsStore.settings.sendMIDI
+        audio.setPreferredDevices(
+            inputID: devices.defaultInputID,
+            outputID: devices.defaultOutputID
+        )
         resetStringStates()
         wireServices()
         settingsStore.$settings
             .sink { [weak self] settings in
                 guard let self else { return }
+                if self.lastSendMIDIEnabled && !settings.sendMIDI {
+                    self.stopActiveMIDINotes()
+                }
+                self.lastSendMIDIEnabled = settings.sendMIDI
                 self.audio.apply(settings: settings)
                 self.midi.selectedDestinationID = settings.midiDestinationUniqueID
                 self.objectWillChange.send()
@@ -48,20 +60,27 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
+        audio.setPreferredDevices(
+            inputID: devices.defaultInputID,
+            outputID: devices.defaultOutputID
+        )
         audio.apply(settings: settings)
         Task { await audio.requestPermissionAndStart() }
     }
 
     func stop() {
-        repeatScheduler.stopAll()
-        midi.allNotesOff()
+        stopPattern()
+        releaseHeldStrings()
+        stopActiveMIDINotes()
         audio.stop()
     }
 
     func selectProfile(id: String) {
         guard InstrumentProfile.all.contains(where: { $0.id == id }) else { return }
         stopPattern()
-        heldStrings.removeAll()
+        releaseHeldStrings()
+        stopActiveMIDINotes()
+        audio.clearCapturedAttacks()
         settingsStore.settings.profileID = id
         resetStringStates()
     }
@@ -72,6 +91,11 @@ final class AppModel: ObservableObject {
         }
         if mode != .pattern { stopPattern() }
         settingsStore.settings.mode = mode
+        if mode == .tremolo {
+            for index in heldStrings where pendingInitialAttacks[index] == nil {
+                startTremolo(stringIndex: index, fireImmediately: true)
+            }
+        }
     }
 
     func cycleMode(_ direction: Int) {
@@ -84,7 +108,7 @@ final class AppModel: ObservableObject {
     func adjustTempo(_ amount: Double) {
         settingsStore.settings.bpm = max(30, min(300, settings.bpm + amount))
         if settings.mode == .tremolo {
-            heldStrings.forEach { startTremolo(stringIndex: $0) }
+            heldStrings.forEach { startTremolo(stringIndex: $0, fireImmediately: false) }
         }
         if isPatternPlaying {
             stopPattern()
@@ -98,19 +122,23 @@ final class AppModel: ObservableObject {
             heldStrings.insert(index)
             stringStates[index].isHeld = true
             captureStringIndex = index
-            captureWindowEnds = Date().addingTimeInterval(0.22)
-            resolveLatestPitch(for: index)
+            captureWindowStarted = ProcessInfo.processInfo.systemUptime
+            captureWindowEnds = Date().addingTimeInterval(0.24)
 
-            if settings.mode == .tremolo {
-                startTremolo(stringIndex: index)
-            } else {
-                trigger(stringIndex: index)
-            }
+            let string = profile.strings[index]
+            audio.focusDetection(
+                stringIndex: index,
+                minimumFrequency: string.openFrequency,
+                maximumFrequency: PitchMath.frequency(
+                    forMIDINote: Double(string.openMIDINote + string.maximumFret)
+                ),
+                duration: 0.24
+            )
+            queueInitialAttack(stringIndex: index)
         } else {
             heldStrings.remove(index)
             stringStates[index].isHeld = false
             repeatScheduler.stop(id: index)
-            if captureStringIndex == index { captureStringIndex = nil }
         }
     }
 
@@ -152,6 +180,9 @@ final class AppModel: ObservableObject {
 
     func stopPattern() {
         repeatScheduler.stop(id: 10_000)
+        if isPatternPlaying {
+            stopActiveMIDINotes()
+        }
         isPatternPlaying = false
         patternStepIndex = 0
     }
@@ -162,14 +193,19 @@ final class AppModel: ObservableObject {
     }
 
     func selectMIDIDestination(_ id: MIDIUniqueID?) {
+        stopActiveMIDINotes()
         midi.selectedDestinationID = id
         settingsStore.settings.midiDestinationUniqueID = id
     }
 
     func chooseInputDevice(_ id: AudioDeviceID) {
         do {
-            try devices.setDefaultInput(id)
+            try devices.selectInput(id)
             devices.refresh()
+            audio.setPreferredDevices(
+                inputID: devices.defaultInputID,
+                outputID: devices.defaultOutputID
+            )
             audio.restart()
         } catch {
             bannerMessage = error.localizedDescription
@@ -178,8 +214,12 @@ final class AppModel: ObservableObject {
 
     func chooseOutputDevice(_ id: AudioDeviceID) {
         do {
-            try devices.setDefaultOutput(id)
+            try devices.selectOutput(id)
             devices.refresh()
+            audio.setPreferredDevices(
+                inputID: devices.defaultInputID,
+                outputID: devices.defaultOutputID
+            )
             audio.restart()
         } catch {
             bannerMessage = error.localizedDescription
@@ -199,12 +239,52 @@ final class AppModel: ObservableObject {
         stringStates = profile.strings.map(StringState.openState)
     }
 
+    private func releaseHeldStrings() {
+        repeatScheduler.stopAll()
+        pendingInitialAttacks.values.forEach { $0.cancel() }
+        pendingInitialAttacks.removeAll()
+        heldStrings.removeAll()
+        captureStringIndex = nil
+        captureWindowStarted = 0
+        captureWindowEnds = .distantPast
+        for index in stringStates.indices {
+            stringStates[index].isHeld = false
+        }
+    }
+
+    private func stopActiveMIDINotes() {
+        midi.allNotesOff()
+        activeMIDINotes.removeAll()
+    }
+
+    private func queueInitialAttack(stringIndex: Int) {
+        pendingInitialAttacks[stringIndex]?.cancel()
+        let openFrequency = profile.strings[stringIndex].openFrequency
+        let delay = max(0.028, min(0.150, 4.5 / openFrequency))
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.completeInitialAttack(stringIndex: stringIndex)
+        }
+        pendingInitialAttacks[stringIndex] = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func completeInitialAttack(stringIndex: Int) {
+        guard let workItem = pendingInitialAttacks.removeValue(forKey: stringIndex) else { return }
+        workItem.cancel()
+        trigger(stringIndex: stringIndex)
+        if heldStrings.contains(stringIndex), settings.mode == .tremolo {
+            startTremolo(stringIndex: stringIndex, fireImmediately: false)
+        }
+    }
+
     private func handlePitch(_ pitch: DetectedPitch) {
         latestPitch = pitch
         guard pitch.confidence >= 0.55 else { return }
 
         let target: Int?
-        if let captureStringIndex, Date() <= captureWindowEnds {
+        if let captureStringIndex,
+           Date() <= captureWindowEnds,
+           pitch.timestamp >= captureWindowStarted - 0.01 {
             target = captureStringIndex
         } else if heldStrings.count == 1 {
             target = heldStrings.first
@@ -213,11 +293,6 @@ final class AppModel: ObservableObject {
         }
         guard let target else { return }
         apply(pitch: pitch, to: target)
-    }
-
-    private func resolveLatestPitch(for index: Int) {
-        guard let latestPitch, ProcessInfo.processInfo.systemUptime - latestPitch.timestamp < 0.35 else { return }
-        apply(pitch: latestPitch, to: index)
     }
 
     private func apply(pitch: DetectedPitch, to index: Int) {
@@ -233,11 +308,18 @@ final class AppModel: ObservableObject {
         if settings.sendMIDI, activeMIDINotes[index] != nil {
             midi.pitchBend(cents: resolved.centsOffset, channel: index)
         }
+        if pendingInitialAttacks[index] != nil {
+            completeInitialAttack(stringIndex: index)
+        }
     }
 
-    private func startTremolo(stringIndex: Int) {
+    private func startTremolo(stringIndex: Int, fireImmediately: Bool) {
         let interval = settings.subdivision.intervalSeconds(bpm: settings.bpm)
-        repeatScheduler.start(id: stringIndex, interval: interval) { [weak self] in
+        repeatScheduler.start(
+            id: stringIndex,
+            interval: interval,
+            fireImmediately: fireImmediately
+        ) { [weak self] in
             Task { @MainActor in self?.trigger(stringIndex: stringIndex) }
         }
     }
@@ -258,14 +340,17 @@ final class AppModel: ObservableObject {
         guard settings.sendMIDI else { return }
         if let old = activeMIDINotes[stringIndex] {
             midi.noteOff(note: old, channel: stringIndex)
+            midi.resetPitchBend(channel: stringIndex)
         }
         activeMIDINotes[stringIndex] = state.midiNote
+        midi.pitchBend(cents: state.centsOffset, channel: stringIndex)
         midi.noteOn(note: state.midiNote, velocity: Int(velocity * 127), channel: stringIndex)
 
         let gate = min(0.24, settings.subdivision.intervalSeconds(bpm: settings.bpm) * 0.78)
         DispatchQueue.main.asyncAfter(deadline: .now() + gate) { [weak self] in
             guard let self, self.activeMIDINotes[stringIndex] == state.midiNote else { return }
             self.midi.noteOff(note: state.midiNote, channel: stringIndex)
+            self.midi.resetPitchBend(channel: stringIndex)
             self.activeMIDINotes.removeValue(forKey: stringIndex)
         }
     }

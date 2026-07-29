@@ -2,7 +2,7 @@ import Foundation
 
 struct YINPitchDetector {
     var threshold: Double = 0.15
-    var minimumFrequency: Double = 35
+    var minimumFrequency: Double = 25
     var maximumFrequency: Double = 1600
     var minimumRMS: Double = 0.0007
 

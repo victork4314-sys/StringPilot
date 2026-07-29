@@ -1,4 +1,5 @@
 #if os(macOS)
+import Combine
 import CoreMIDI
 import Foundation
 
@@ -46,13 +47,11 @@ final class MIDIOutput: ObservableObject {
     }
 
     func noteOn(note: Int, velocity: Int, channel: Int) {
-        let message = MIDI1UPNoteOn(0, UInt8(clamping: channel), UInt8(clamping: note), UInt8(clamping: velocity))
-        send(message)
+        send(MIDI1UPNoteOn(0, UInt8(clamping: channel), UInt8(clamping: note), UInt8(clamping: velocity)))
     }
 
     func noteOff(note: Int, velocity: Int = 0, channel: Int) {
-        let message = MIDI1UPNoteOff(0, UInt8(clamping: channel), UInt8(clamping: note), UInt8(clamping: velocity))
-        send(message)
+        send(MIDI1UPNoteOff(0, UInt8(clamping: channel), UInt8(clamping: note), UInt8(clamping: velocity)))
     }
 
     func pitchBend(cents: Double, rangeSemitones: Double = 2, channel: Int) {
@@ -63,9 +62,14 @@ final class MIDIOutput: ObservableObject {
         send(MIDI1UPPitchBend(0, UInt8(clamping: channel), lsb, msb))
     }
 
+    func resetPitchBend(channel: Int) {
+        pitchBend(cents: 0, channel: channel)
+    }
+
     func allNotesOff() {
         for channel in 0..<16 {
             send(MIDI1UPControlChange(0, UInt8(channel), 123, 0))
+            resetPitchBend(channel: channel)
         }
     }
 

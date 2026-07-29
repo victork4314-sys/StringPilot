@@ -9,6 +9,7 @@ struct StringPilotApp: App {
         WindowGroup {
             ContentView(model: model)
                 .onAppear { model.start() }
+                .onDisappear { model.stop() }
         }
         .commands {
             CommandMenu("Performance") {
@@ -28,7 +29,4 @@ struct StringPilotApp: App {
         }
     }
 }
-#else
-import Foundation
-print("StringPilot requires macOS.")
 #endif

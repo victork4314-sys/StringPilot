@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Select Xcode 16.4
         run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
@@ -39,13 +39,33 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Select Xcode 16.4
         run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
 
       - name: Validate project and scheme
         run: xcodebuild -list -project StringPilot.xcodeproj
+
+      - name: Validate audio input entitlement
+        run: |
+          set -euo pipefail
+          plutil -lint StringPilot/StringPilot.entitlements
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          path = Path("StringPilot/StringPilot.entitlements")
+          with path.open("rb") as handle:
+              entitlements = plistlib.load(handle)
+          assert entitlements.get("com.apple.security.device.audio-input") is True
+          PY
+          xcodebuild \
+            -project StringPilot.xcodeproj \
+            -scheme StringPilot \
+            -configuration Debug \
+            -showBuildSettings \
+            | grep -F "CODE_SIGN_ENTITLEMENTS = StringPilot/StringPilot.entitlements"
 
       - name: Build StringPilot
         run: |

@@ -23,10 +23,22 @@ final class PitchDetectorTests: XCTestCase {
             harmonic: 0.28,
             noise: 0.012
         )
-        var detector = YINPitchDetector()
-        detector.minimumFrequency = 30
-        let result = try XCTUnwrap(detector.detect(samples: samples, sampleRate: 48_000))
+        let result = try XCTUnwrap(YINPitchDetector().detect(samples: samples, sampleRate: 48_000))
         XCTAssertEqual(result.frequency, frequency, accuracy: 0.7)
+    }
+
+    func testDetectsFiveStringBassLowBWithoutSpecialConfiguration() throws {
+        let frequency = 30.8677
+        let samples = signal(
+            frequency: frequency,
+            sampleRate: 48_000,
+            count: 16_384,
+            harmonic: 0.24,
+            noise: 0.006
+        )
+        let result = try XCTUnwrap(YINPitchDetector().detect(samples: samples, sampleRate: 48_000))
+        XCTAssertEqual(result.frequency, frequency, accuracy: 0.55)
+        XCTAssertGreaterThan(result.confidence, 0.75)
     }
 
     func testRejectsSilence() {
