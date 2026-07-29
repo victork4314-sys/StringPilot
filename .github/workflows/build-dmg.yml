@@ -1,0 +1,46 @@
+name: Build macOS DMG
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stringpilot-dmg-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-dmg:
+    name: Package StringPilot.dmg
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+
+      - name: Build and verify disk image
+        run: bash scripts/build-dmg.sh
+
+      - name: Show package details
+        run: |
+          ls -lh dist/StringPilot.dmg dist/StringPilot.dmg.sha256
+          cat dist/StringPilot.dmg.sha256
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v7
+        with:
+          name: StringPilot-macOS-DMG
+          path: |
+            dist/StringPilot.dmg
+            dist/StringPilot.dmg.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
