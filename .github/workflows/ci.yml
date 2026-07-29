@@ -47,6 +47,18 @@ jobs:
       - name: Validate project and scheme
         run: xcodebuild -list -project StringPilot.xcodeproj
 
+      - name: Validate audio input entitlement
+        run: |
+          set -euo pipefail
+          plutil -lint StringPilot/StringPilot.entitlements
+          plutil -extract com.apple.security.device.audio-input raw StringPilot/StringPilot.entitlements | grep -Fx true
+          xcodebuild \
+            -project StringPilot.xcodeproj \
+            -scheme StringPilot \
+            -configuration Debug \
+            -showBuildSettings \
+            | grep -F "CODE_SIGN_ENTITLEMENTS = StringPilot/StringPilot.entitlements"
+
       - name: Build StringPilot
         run: |
           set -o pipefail
