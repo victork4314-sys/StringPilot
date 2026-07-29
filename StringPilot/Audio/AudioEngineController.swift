@@ -1,6 +1,8 @@
 #if os(macOS)
+import AudioToolbox
 import AVFoundation
 import Combine
+import CoreAudio
 import Foundation
 
 final class AudioEngineController: ObservableObject {
@@ -42,9 +44,22 @@ final class AudioEngineController: ObservableObject {
     private var pitchDetector = YINPitchDetector()
     private var sensitivity: Double = 3
     private var noiseGateDB: Double = -58
+    private var preferredInputDeviceID: AudioDeviceID?
+    private var preferredOutputDeviceID: AudioDeviceID?
+    private var nodesAttached = false
     private var configured = false
     private var seedCounter: UInt64 = 1
     private var tapInstalled = false
+
+    func setPreferredDevices(inputID: AudioDeviceID, outputID: AudioDeviceID) {
+        preferredInputDeviceID = inputID == 0 ? nil : inputID
+        preferredOutputDeviceID = outputID == 0 ? nil : outputID
+    }
+
+    func selectDevices(inputID: AudioDeviceID, outputID: AudioDeviceID) {
+        setPreferredDevices(inputID: inputID, outputID: outputID)
+        restart()
+    }
 
     func requestPermissionAndStart() async {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -75,15 +90,13 @@ final class AudioEngineController: ObservableObject {
     }
 
     func stop() {
-        guard configured else { return }
         players.forEach { $0.stop() }
         engine.stop()
         state = .stopped
     }
 
     func restart() {
-        stop()
-        engine.reset()
+        tearDownGraph()
         start()
     }
 
@@ -100,7 +113,7 @@ final class AudioEngineController: ObservableObject {
     func play(stringIndex: Int, frequency: Double, velocity: Double, palmMute: Double) {
         guard players.indices.contains(stringIndex), state == .running else { return }
         let player = players[stringIndex]
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else { return }
         let duration = palmMute > 0.7 ? 0.22 : 1.1
         seedCounter &+= 0x9E3779B97F4A7C15
         let samples = generator.generate(.init(
@@ -117,7 +130,8 @@ final class AudioEngineController: ObservableObject {
         ), let channel = buffer.floatChannelData?[0] else { return }
         buffer.frameLength = AVAudioFrameCount(samples.count)
         samples.withUnsafeBufferPointer { source in
-            channel.update(from: source.baseAddress!, count: samples.count)
+            guard let baseAddress = source.baseAddress else { return }
+            channel.update(from: baseAddress, count: samples.count)
         }
 
         player.scheduleBuffer(buffer, at: nil, options: [.interrupts])
@@ -126,19 +140,28 @@ final class AudioEngineController: ObservableObject {
 
     private func configureGraph() throws {
         let input = engine.inputNode
+        let output = engine.outputNode
+        try applyPreferredDevice(preferredInputDeviceID, to: input.audioUnit, role: "input")
+        try applyPreferredDevice(preferredOutputDeviceID, to: output.audioUnit, role: "output")
+
         let inputFormat = input.inputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
             throw AudioEngineError.noInput
         }
         sampleRate = inputFormat.sampleRate
 
-        [monitorMixer, synthMixer, toneMixer, distortion, equalizer, reverb].forEach(engine.attach)
-        players.forEach(engine.attach)
+        if !nodesAttached {
+            [monitorMixer, synthMixer, toneMixer, distortion, equalizer, reverb].forEach(engine.attach)
+            players.forEach(engine.attach)
+            nodesAttached = true
+        }
 
         engine.connect(input, to: monitorMixer, format: inputFormat)
         engine.connect(monitorMixer, to: toneMixer, format: nil)
 
-        let synthFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
+        guard let synthFormat = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else {
+            throw AudioEngineError.invalidFormat
+        }
         for player in players {
             engine.connect(player, to: synthMixer, format: synthFormat)
         }
@@ -150,15 +173,56 @@ final class AudioEngineController: ObservableObject {
 
         configureEQ()
         reverb.loadFactoryPreset(.mediumRoom)
-        reverb.wetDryMix = 8
-        distortion.wetDryMix = 0
 
-        if tapInstalled { input.removeTap(onBus: 0) }
         input.installTap(onBus: 0, bufferSize: 512, format: inputFormat) { [weak self] buffer, time in
             self?.copyForAnalysis(buffer: buffer, time: time)
         }
         tapInstalled = true
         configured = true
+    }
+
+    private func tearDownGraph() {
+        players.forEach { $0.stop() }
+        engine.stop()
+
+        let input = engine.inputNode
+        if tapInstalled {
+            input.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+
+        engine.disconnectNodeOutput(input)
+        players.forEach(engine.disconnectNodeOutput)
+        [monitorMixer, synthMixer, toneMixer, distortion, equalizer, reverb].forEach(engine.disconnectNodeOutput)
+        engine.reset()
+        configured = false
+        latestPitch = nil
+        inputLevelDB = -120
+        analysisQueue.sync {
+            analysisBuffer.removeAll(keepingCapacity: true)
+            lastAnalysisTime = 0
+        }
+    }
+
+    private func applyPreferredDevice(
+        _ deviceID: AudioDeviceID?,
+        to audioUnit: AudioUnit?,
+        role: String
+    ) throws {
+        guard let deviceID else { return }
+        guard let audioUnit else { throw AudioEngineError.missingAudioUnit(role) }
+        var mutableID = deviceID
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &mutableID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        guard status == noErr else {
+            throw AudioEngineError.deviceSelection(role: role, status: status)
+        }
     }
 
     private func configureEQ() {
@@ -242,11 +306,20 @@ final class AudioEngineController: ObservableObject {
 
 enum AudioEngineError: LocalizedError {
     case noInput
+    case invalidFormat
+    case missingAudioUnit(String)
+    case deviceSelection(role: String, status: OSStatus)
 
     var errorDescription: String? {
         switch self {
         case .noInput:
             return "No usable audio input is selected. Connect the iRig and choose it as the input device."
+        case .invalidFormat:
+            return "The selected audio device did not provide a usable mono playback format."
+        case .missingAudioUnit(let role):
+            return "The macOS \(role) audio unit is unavailable."
+        case .deviceSelection(let role, let status):
+            return "The selected \(role) device could not be opened. Core Audio error \(status)."
         }
     }
 }
