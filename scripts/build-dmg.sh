@@ -14,10 +14,29 @@ APP_PATH="$DERIVED_DATA/Build/Products/$CONFIGURATION/$APP_NAME.app"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
 ENTITLEMENTS="$ROOT_DIR/StringPilot/StringPilot.entitlements"
 
-cleanup() {
-    if mount | grep -Fq "on $MOUNT_DIR "; then
-        hdiutil detach "$MOUNT_DIR" -quiet || true
+is_mounted() {
+    mount | grep -Fq "on $MOUNT_DIR "
+}
+
+detach_image() {
+    if ! is_mounted; then
+        return 0
     fi
+
+    sync
+    for attempt in 1 2 3 4 5; do
+        if hdiutil detach "$MOUNT_DIR" -quiet; then
+            return 0
+        fi
+        printf 'Disk image is temporarily busy; detach retry %s/5\n' "$attempt" >&2
+        sleep 2
+    done
+
+    hdiutil detach "$MOUNT_DIR" -force -quiet
+}
+
+cleanup() {
+    detach_image || true
 }
 trap cleanup EXIT
 
@@ -72,7 +91,10 @@ test -L "$MOUNT_DIR/Applications"
 test -x "$MOUNT_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME"
 codesign --verify --deep --strict --verbose=2 "$MOUNT_DIR/$APP_NAME.app"
 
-hdiutil detach "$MOUNT_DIR" -quiet
+# APFS disk images occasionally remain busy for a fraction of a second after
+# signature verification on hosted runners. Retry normal detach before using a
+# forced detach so a transient mount race cannot discard an otherwise valid DMG.
+detach_image
 shasum -a 256 "$DMG_PATH" > "$DIST_DIR/$APP_NAME.dmg.sha256"
 
 printf '\nCreated %s\n' "$DMG_PATH"
