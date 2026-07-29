@@ -1,5 +1,6 @@
 #if os(macOS)
 import AVFoundation
+import Combine
 import Foundation
 
 final class AudioEngineController: ObservableObject {
