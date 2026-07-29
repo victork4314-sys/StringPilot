@@ -200,7 +200,7 @@ final class AppModel: ObservableObject {
 
     func chooseInputDevice(_ id: AudioDeviceID) {
         do {
-            try devices.setDefaultInput(id)
+            try devices.selectInput(id)
             devices.refresh()
             audio.setPreferredDevices(
                 inputID: devices.defaultInputID,
@@ -214,7 +214,7 @@ final class AppModel: ObservableObject {
 
     func chooseOutputDevice(_ id: AudioDeviceID) {
         do {
-            try devices.setDefaultOutput(id)
+            try devices.selectOutput(id)
             devices.refresh()
             audio.setPreferredDevices(
                 inputID: devices.defaultInputID,
