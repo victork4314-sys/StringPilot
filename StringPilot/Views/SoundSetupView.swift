@@ -57,6 +57,10 @@ struct SoundSetupView: View {
                         Button("Restart audio") { model.audio.restart() }
                     }
                     .padding(.top, 8)
+                    Text("A single interface with both input and headphone/output channels is the most reliable setup. If macOS cannot open two different devices together, combine them as one Aggregate Device in Audio MIDI Setup, then select that aggregate for both fields.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if let error = devices.errorMessage {
                         Text(error).foregroundStyle(.red)
                     }
