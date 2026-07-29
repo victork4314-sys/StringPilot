@@ -28,7 +28,4 @@ struct StringPilotApp: App {
         }
     }
 }
-#else
-import Foundation
-print("StringPilot requires macOS.")
 #endif
