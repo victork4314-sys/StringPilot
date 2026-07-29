@@ -37,6 +37,10 @@ final class AppModel: ObservableObject {
 
     init() {
         lastSendMIDIEnabled = settingsStore.settings.sendMIDI
+        audio.setPreferredDevices(
+            inputID: devices.defaultInputID,
+            outputID: devices.defaultOutputID
+        )
         resetStringStates()
         wireServices()
         settingsStore.$settings
@@ -54,6 +58,10 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
+        audio.setPreferredDevices(
+            inputID: devices.defaultInputID,
+            outputID: devices.defaultOutputID
+        )
         audio.apply(settings: settings)
         Task { await audio.requestPermissionAndStart() }
     }
@@ -185,6 +193,10 @@ final class AppModel: ObservableObject {
         do {
             try devices.setDefaultInput(id)
             devices.refresh()
+            audio.setPreferredDevices(
+                inputID: devices.defaultInputID,
+                outputID: devices.defaultOutputID
+            )
             audio.restart()
         } catch {
             bannerMessage = error.localizedDescription
@@ -195,6 +207,10 @@ final class AppModel: ObservableObject {
         do {
             try devices.setDefaultOutput(id)
             devices.refresh()
+            audio.setPreferredDevices(
+                inputID: devices.defaultInputID,
+                outputID: devices.defaultOutputID
+            )
             audio.restart()
         } catch {
             bannerMessage = error.localizedDescription
