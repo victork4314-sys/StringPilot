@@ -22,7 +22,9 @@ final class AppModel: ObservableObject {
     private let repeatScheduler = RepeatScheduler()
     private var cancellables: Set<AnyCancellable> = []
     private var heldStrings: Set<Int> = []
+    private var pendingInitialAttacks: [Int: DispatchWorkItem] = [:]
     private var captureStringIndex: Int?
+    private var captureWindowStarted: TimeInterval = 0
     private var captureWindowEnds = Date.distantPast
     private var activeMIDINotes: [Int: Int] = [:]
     private var lastSendMIDIEnabled: Bool
@@ -89,7 +91,9 @@ final class AppModel: ObservableObject {
         if mode != .pattern { stopPattern() }
         settingsStore.settings.mode = mode
         if mode == .tremolo {
-            heldStrings.forEach { startTremolo(stringIndex: $0) }
+            for index in heldStrings where pendingInitialAttacks[index] == nil {
+                startTremolo(stringIndex: index, fireImmediately: true)
+            }
         }
     }
 
@@ -103,7 +107,7 @@ final class AppModel: ObservableObject {
     func adjustTempo(_ amount: Double) {
         settingsStore.settings.bpm = max(30, min(300, settings.bpm + amount))
         if settings.mode == .tremolo {
-            heldStrings.forEach { startTremolo(stringIndex: $0) }
+            heldStrings.forEach { startTremolo(stringIndex: $0, fireImmediately: false) }
         }
         if isPatternPlaying {
             stopPattern()
@@ -117,19 +121,22 @@ final class AppModel: ObservableObject {
             heldStrings.insert(index)
             stringStates[index].isHeld = true
             captureStringIndex = index
-            captureWindowEnds = Date().addingTimeInterval(0.22)
-            resolveLatestPitch(for: index)
+            captureWindowStarted = ProcessInfo.processInfo.systemUptime
+            captureWindowEnds = Date().addingTimeInterval(0.24)
 
-            if settings.mode == .tremolo {
-                startTremolo(stringIndex: index)
-            } else {
-                trigger(stringIndex: index)
-            }
+            let string = profile.strings[index]
+            audio.focusDetection(
+                minimumFrequency: string.openFrequency,
+                maximumFrequency: PitchMath.frequency(
+                    forMIDINote: Double(string.openMIDINote + string.maximumFret)
+                ),
+                duration: 0.24
+            )
+            queueInitialAttack(stringIndex: index)
         } else {
             heldStrings.remove(index)
             stringStates[index].isHeld = false
             repeatScheduler.stop(id: index)
-            if captureStringIndex == index { captureStringIndex = nil }
         }
     }
 
@@ -232,8 +239,11 @@ final class AppModel: ObservableObject {
 
     private func releaseHeldStrings() {
         repeatScheduler.stopAll()
+        pendingInitialAttacks.values.forEach { $0.cancel() }
+        pendingInitialAttacks.removeAll()
         heldStrings.removeAll()
         captureStringIndex = nil
+        captureWindowStarted = 0
         captureWindowEnds = .distantPast
         for index in stringStates.indices {
             stringStates[index].isHeld = false
@@ -245,12 +255,34 @@ final class AppModel: ObservableObject {
         activeMIDINotes.removeAll()
     }
 
+    private func queueInitialAttack(stringIndex: Int) {
+        pendingInitialAttacks[stringIndex]?.cancel()
+        let openFrequency = profile.strings[stringIndex].openFrequency
+        let delay = max(0.018, min(0.125, 3.8 / openFrequency))
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.completeInitialAttack(stringIndex: stringIndex)
+        }
+        pendingInitialAttacks[stringIndex] = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func completeInitialAttack(stringIndex: Int) {
+        guard let workItem = pendingInitialAttacks.removeValue(forKey: stringIndex) else { return }
+        workItem.cancel()
+        trigger(stringIndex: stringIndex)
+        if heldStrings.contains(stringIndex), settings.mode == .tremolo {
+            startTremolo(stringIndex: stringIndex, fireImmediately: false)
+        }
+    }
+
     private func handlePitch(_ pitch: DetectedPitch) {
         latestPitch = pitch
         guard pitch.confidence >= 0.55 else { return }
 
         let target: Int?
-        if let captureStringIndex, Date() <= captureWindowEnds {
+        if let captureStringIndex,
+           Date() <= captureWindowEnds,
+           pitch.timestamp >= captureWindowStarted - 0.01 {
             target = captureStringIndex
         } else if heldStrings.count == 1 {
             target = heldStrings.first
@@ -259,11 +291,6 @@ final class AppModel: ObservableObject {
         }
         guard let target else { return }
         apply(pitch: pitch, to: target)
-    }
-
-    private func resolveLatestPitch(for index: Int) {
-        guard let latestPitch, ProcessInfo.processInfo.systemUptime - latestPitch.timestamp < 0.35 else { return }
-        apply(pitch: latestPitch, to: index)
     }
 
     private func apply(pitch: DetectedPitch, to index: Int) {
@@ -279,11 +306,18 @@ final class AppModel: ObservableObject {
         if settings.sendMIDI, activeMIDINotes[index] != nil {
             midi.pitchBend(cents: resolved.centsOffset, channel: index)
         }
+        if pendingInitialAttacks[index] != nil {
+            completeInitialAttack(stringIndex: index)
+        }
     }
 
-    private func startTremolo(stringIndex: Int) {
+    private func startTremolo(stringIndex: Int, fireImmediately: Bool) {
         let interval = settings.subdivision.intervalSeconds(bpm: settings.bpm)
-        repeatScheduler.start(id: stringIndex, interval: interval) { [weak self] in
+        repeatScheduler.start(
+            id: stringIndex,
+            interval: interval,
+            fireImmediately: fireImmediately
+        ) { [weak self] in
             Task { @MainActor in self?.trigger(stringIndex: stringIndex) }
         }
     }
