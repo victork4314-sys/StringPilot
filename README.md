@@ -71,6 +71,16 @@ Several nearly simultaneous presses can still be performed, but one ordinary mon
 - iRig or another Core Audio input device.
 - Headphones are strongly recommended during setup to avoid the output re-entering the pickup or interface input.
 
+## Install from the DMG
+
+1. Download `StringPilot.dmg` from a successful **Build macOS DMG** workflow artifact.
+2. Open the disk image.
+3. Drag `StringPilot.app` onto the included **Applications** shortcut.
+4. On the first launch, Control-click the app and choose **Open**.
+5. Approve microphone/input access when macOS asks.
+
+The public GitHub Actions package is ad-hoc signed because the repository does not contain an Apple Developer ID certificate or notarization credentials. The build script verifies the app signature and the mounted disk image, but macOS may still show the normal warning for an app that has not been Apple-notarized.
+
 ## Build and run
 
 1. Open `StringPilot.xcodeproj` in Xcode.
@@ -82,6 +92,14 @@ Several nearly simultaneous presses can still be performed, but one ordinary mon
 7. Start with headphones, increase sensitivity until light fret contact registers, then raise the noise gate until idle noise stops producing detections.
 
 The project uses no third-party runtime packages.
+
+To build and verify the distributable disk image locally:
+
+```bash
+bash scripts/build-dmg.sh
+```
+
+The finished files are written to `dist/StringPilot.dmg` and `dist/StringPilot.dmg.sha256`.
 
 ## Logic Pro
 
@@ -115,6 +133,6 @@ xcodebuild \
   clean build
 ```
 
-The GitHub Actions workflow runs both checks on every push and pull request. Physical iRig, Xbox controller, instrument, USB/Bluetooth, and DAW checks follow `docs/HARDWARE_VALIDATION.md` because a hosted runner cannot manufacture those inputs. Those rows must be completed on real hardware before claiming hardware sign-off.
+The GitHub Actions workflows run the signal tests, native app compilation, and verified DMG packaging on every pull request. Physical iRig, Xbox controller, instrument, USB/Bluetooth, and DAW checks follow `docs/HARDWARE_VALIDATION.md` because a hosted runner cannot manufacture those inputs. Those rows must be completed on real hardware before claiming hardware sign-off.
 
 See `docs/ARCHITECTURE.md` and `docs/HARDWARE_VALIDATION.md` for the exact runtime pipeline and physical test matrix.
