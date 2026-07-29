@@ -51,7 +51,15 @@ jobs:
         run: |
           set -euo pipefail
           plutil -lint StringPilot/StringPilot.entitlements
-          test "$(plutil -extract com.apple.security.device.audio-input raw StringPilot/StringPilot.entitlements)" = "1"
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          path = Path("StringPilot/StringPilot.entitlements")
+          with path.open("rb") as handle:
+              entitlements = plistlib.load(handle)
+          assert entitlements.get("com.apple.security.device.audio-input") is True
+          PY
           xcodebuild \
             -project StringPilot.xcodeproj \
             -scheme StringPilot \
