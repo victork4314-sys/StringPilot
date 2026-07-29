@@ -17,6 +17,7 @@ final class XboxControllerManager: ObservableObject {
 
     private var observers: [NSObjectProtocol] = []
     private weak var activeController: GCController?
+    private var pressedStrings: Set<Int> = []
     private var strumLatch = false
 
     init() {
@@ -51,6 +52,9 @@ final class XboxControllerManager: ObservableObject {
 
     private func configure(_ controller: GCController) {
         guard let gamepad = controller.extendedGamepad else { return }
+        if let activeController, activeController !== controller {
+            releasePressedStrings()
+        }
         activeController = controller
         isConnected = true
         controllerName = controller.vendorName ?? "Xbox controller"
@@ -92,8 +96,26 @@ final class XboxControllerManager: ObservableObject {
 
     private func bind(_ button: GCControllerButtonInput, stringIndex: Int) {
         button.pressedChangedHandler = { [weak self] _, _, pressed in
-            Task { @MainActor in self?.onStringButton?(stringIndex, pressed) }
+            Task { @MainActor in
+                self?.handleStringButtonChange(index: stringIndex, pressed: pressed)
+            }
         }
+    }
+
+    private func handleStringButtonChange(index: Int, pressed: Bool) {
+        if pressed {
+            guard pressedStrings.insert(index).inserted else { return }
+        } else {
+            guard pressedStrings.remove(index) != nil else { return }
+        }
+        onStringButton?(index, pressed)
+    }
+
+    private func releasePressedStrings() {
+        let indexes = pressedStrings.sorted()
+        pressedStrings.removeAll()
+        indexes.forEach { onStringButton?($0, false) }
+        strumLatch = false
     }
 
     private func handleStrumAxis(_ y: Float) {
@@ -108,6 +130,7 @@ final class XboxControllerManager: ObservableObject {
 
     private func disconnect(_ controller: GCController) {
         guard activeController === controller else { return }
+        releasePressedStrings()
         activeController = nil
         isConnected = false
         controllerName = "No Xbox controller"
