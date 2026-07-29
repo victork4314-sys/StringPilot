@@ -11,7 +11,18 @@ let package = Package(
         .target(
             name: "StringPilotCore",
             path: "StringPilot",
-            exclude: ["App", "Controller", "MIDI", "Views", "Resources", "Info.plist", "Audio/AudioDeviceManager.swift", "Audio/AudioEngineController.swift", "Utilities/RepeatScheduler.swift", "Utilities/SettingsStore.swift"],
+            exclude: [
+                "App",
+                "Controller",
+                "MIDI",
+                "Views",
+                "Info.plist",
+                "StringPilot.entitlements",
+                "Audio/AudioDeviceManager.swift",
+                "Audio/AudioEngineController.swift",
+                "Utilities/RepeatScheduler.swift",
+                "Utilities/SettingsStore.swift"
+            ],
             sources: [
                 "Models/PerformanceModels.swift",
                 "Models/PatternParser.swift",
