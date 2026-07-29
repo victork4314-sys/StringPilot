@@ -3,6 +3,11 @@ import Combine
 import CoreAudio
 import Foundation
 
+extension Notification.Name {
+    static let stringPilotInputDeviceChanged = Notification.Name("StringPilot.InputDeviceChanged")
+    static let stringPilotOutputDeviceChanged = Notification.Name("StringPilot.OutputDeviceChanged")
+}
+
 struct AudioDevice: Identifiable, Hashable {
     let id: AudioDeviceID
     let name: String
@@ -44,18 +49,26 @@ final class AudioDeviceManager: ObservableObject {
         }
     }
 
-    func selectInput(_ id: AudioDeviceID) throws {
+    func setDefaultInput(_ id: AudioDeviceID) throws {
         guard devices.contains(where: { $0.id == id && $0.hasInput }) else {
             throw AudioDeviceError.invalidInput(id)
         }
         defaultInputID = id
+        NotificationCenter.default.post(
+            name: .stringPilotInputDeviceChanged,
+            object: NSNumber(value: id)
+        )
     }
 
-    func selectOutput(_ id: AudioDeviceID) throws {
+    func setDefaultOutput(_ id: AudioDeviceID) throws {
         guard devices.contains(where: { $0.id == id && $0.hasOutput }) else {
             throw AudioDeviceError.invalidOutput(id)
         }
         defaultOutputID = id
+        NotificationCenter.default.post(
+            name: .stringPilotOutputDeviceChanged,
+            object: NSNumber(value: id)
+        )
     }
 
     private static func readDevices() throws -> [AudioDevice] {
