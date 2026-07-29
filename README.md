@@ -2,7 +2,7 @@
 
 StringPilot is a native macOS performance app that lets an Xbox controller replace the picking or plucking hand while the player's other hand remains on a real fretboard.
 
-The instrument connects through an iRig or another audio interface. StringPilot listens for fret contact, hammer-ons, pull-offs, slides, and other small string vibrations. The pressed controller button identifies the physical string, allowing the pitch detector to constrain the result to that string's real fret range. The app then produces the requested attack internally and, when enabled, sends recordable MIDI to Logic Pro, GarageBand, or another MIDI-capable host.
+The instrument connects through an iRig or another audio interface. StringPilot listens for fret contact, hammer-ons, pull-offs, slides, and other small string vibrations. The pressed controller button identifies the physical string, allowing the pitch detector to constrain the result to that string's real fret range. The app then creates the requested attack, preserves part of the real pickup transient, and, when enabled, sends recordable MIDI to Logic Pro, GarageBand, or another MIDI-capable host.
 
 ## What is implemented
 
@@ -13,17 +13,22 @@ The instrument connects through an iRig or another audio interface. StringPilot 
 - Controller-only mode changes and tempo changes.
 - Right-trigger attack strength.
 - Adjustable tempo from 30–300 BPM and quarter through thirty-second-note repeat divisions.
-- Live iRig/interface monitoring with selectable system input and output devices.
+- Live iRig/interface monitoring with app-local input and output selection; choosing a device does not replace the Mac's system defaults.
 - Adjustable input sensitivity and noise gate.
-- YIN pitch detection with confidence scoring, low-frequency bass support, octave correction, and per-string fret constraints.
-- Per-string pitch latching so chords, strums, and patterns can reuse already detected fret states.
-- Internal Karplus–Strong plucked-string attack with palm mute, drive, reverb, and live-input blending.
+- String-focused YIN pitch detection with confidence scoring, adaptive window size, low-frequency bass support, octave correction, and per-string fret constraints.
+- A pending first-attack gate that waits for the simultaneous fret transient and fires early when it resolves, instead of playing the previous/open note first.
+- Per-string pitch latching so later attacks, strums, and patterns can reuse already detected fret states.
+- Per-string capture of the real iRig fret transient, including DC removal, silence rejection, onset detection, trimming, normalization, fades, and pitch-aware replay.
+- A hybrid internal attack that blends the latest real pickup transient with a newly seeded Karplus–Strong tail for every controller attack.
+- Palm mute, drive, reverb, output gain, and live-input blending.
 - A named StringPilot virtual MIDI source plus selectable CoreMIDI destinations.
-- MIDI channels 1–6 assigned per physical string, including per-string pitch bend.
+- MIDI channels 1–6 assigned per physical string, including per-string pitch bend and bend reset after note-off.
 - Logic Pro Virtual In routing and GarageBand virtual-controller routing.
 - Standard guitar, Drop D guitar, four- and five-string bass, ukulele, and mandolin profiles.
 - Persistent settings and pattern data.
-- Automated detector, fret resolver, pattern, timing, profile, and synthesis tests.
+- Controller-disconnect cleanup, app-close cleanup, stuck-note cleanup, and safe audio-graph rebuilding after a device change.
+- Automated detector, fret resolver, pattern, timing, profile, synthesis, real-transient preparation, resampling, and blend tests.
+- Native Xcode compilation on a macOS 15 GitHub runner with Xcode 16.4.
 
 ## Controller layout
 
@@ -41,19 +46,21 @@ The instrument connects through an iRig or another audio interface. StringPilot 
 | Right stick up/down | Upstroke/downstroke in Strum mode |
 | Menu | Start/stop the saved pattern |
 
-In Tremolo mode, hold a string button to repeat that string until release. The repeat rate follows the selected tempo and subdivision.
+In Tremolo mode, hold a string button to repeat that string until release. The first attack resolves the new fret contact; later attacks follow the selected tempo and subdivision. Disconnecting the controller releases every held string.
 
 ## Signal model
 
 A normal guitar pickup is a summed mono source, so software cannot reliably infer six simultaneous physical string positions from silence. StringPilot avoids pretending otherwise:
 
-1. The controller button labels the intended string.
-2. A valid fret transient is resolved only against that string's open note and fret range.
-3. The result is latched for that string.
-4. Held buttons keep updating their string while the left hand moves.
-5. Strums and patterns use the six latched string states.
+1. A controller button labels the intended physical string.
+2. A fresh focused buffer begins at that button press, excluding older audio.
+3. A valid fret transient is resolved only against that string's open note and fret range.
+4. The result is latched for that string.
+5. A short real pickup transient is stored for that string and blended into later attacks.
+6. Held buttons keep updating pitch while the left hand moves.
+7. Strums and patterns use the six latched string states.
 
-This preserves the practical behavior of the proposed instrument while preventing a mixed pickup signal from silently assigning a note to the wrong string.
+Several nearly simultaneous presses can still be performed, but one ordinary mono pickup cannot independently describe several silent fret positions at the exact same instant. Reliable true polyphonic left-hand detection would require per-string pickup channels or another sensor. StringPilot does not disguise that physical limitation.
 
 ## Requirements
 
@@ -62,6 +69,7 @@ This preserves the practical behavior of the proposed instrument while preventin
 - Xbox Wireless Controller or compatible extended Xbox gamepad, connected by Bluetooth or USB.
 - Guitar, bass, ukulele, or mandolin with a usable pickup/interface signal.
 - iRig or another Core Audio input device.
+- Headphones are strongly recommended during setup to avoid the output re-entering the pickup or interface input.
 
 ## Build and run
 
@@ -71,6 +79,7 @@ This preserves the practical behavior of the proposed instrument while preventin
 4. Approve microphone/input access when macOS asks.
 5. In the Sound tab, choose the iRig as input and the desired speakers, headphones, or interface as output.
 6. Connect the Xbox controller and verify that its name appears in the Play tab.
+7. Start with headphones, increase sensitivity until light fret contact registers, then raise the noise gate until idle noise stops producing detections.
 
 The project uses no third-party runtime packages.
 
@@ -80,10 +89,11 @@ The project uses no third-party runtime packages.
 2. In StringPilot's Routing tab, refresh MIDI destinations and select **Logic Pro Virtual In**.
 3. Record-enable a software-instrument track in Logic.
 4. Play with the controller. Each physical string uses its own MIDI channel.
+5. For the real pickup/amp layer, record the iRig on a separate audio track and apply Logic's amp and pedal plug-ins.
 
 ## GarageBand
 
-Leave StringPilot on **Virtual source only**. GarageBand receives the StringPilot virtual MIDI source as a controller. Use a software-instrument track for the generated notes. The iRig's real input can also be recorded on a separate audio track for fret noise, slides, and an amp plug-in chain.
+Leave StringPilot on **Virtual source only**. GarageBand receives the StringPilot virtual MIDI source as a controller. Use a software-instrument track for the generated notes. The iRig's real input can also be recorded on a separate audio track for fret contact, slides, pickup character, and an amp plug-in chain.
 
 ## Verification
 
@@ -105,6 +115,6 @@ xcodebuild \
   clean build
 ```
 
-The GitHub Actions workflow runs both checks on every push and pull request. Physical iRig, Xbox controller, instrument, and DAW checks follow `docs/HARDWARE_VALIDATION.md` because a hosted runner cannot manufacture those inputs.
+The GitHub Actions workflow runs both checks on every push and pull request. Physical iRig, Xbox controller, instrument, USB/Bluetooth, and DAW checks follow `docs/HARDWARE_VALIDATION.md` because a hosted runner cannot manufacture those inputs. Those rows must be completed on real hardware before claiming hardware sign-off.
 
 See `docs/ARCHITECTURE.md` and `docs/HARDWARE_VALIDATION.md` for the exact runtime pipeline and physical test matrix.
