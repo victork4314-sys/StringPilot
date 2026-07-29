@@ -51,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           plutil -lint StringPilot/StringPilot.entitlements
-          plutil -extract com.apple.security.device.audio-input raw StringPilot/StringPilot.entitlements | grep -Fx true
+          test "$(plutil -extract com.apple.security.device.audio-input raw StringPilot/StringPilot.entitlements)" = "1"
           xcodebuild \
             -project StringPilot.xcodeproj \
             -scheme StringPilot \
