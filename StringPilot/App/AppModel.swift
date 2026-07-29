@@ -260,7 +260,7 @@ final class AppModel: ObservableObject {
     private func queueInitialAttack(stringIndex: Int) {
         pendingInitialAttacks[stringIndex]?.cancel()
         let openFrequency = profile.strings[stringIndex].openFrequency
-        let delay = max(0.018, min(0.125, 3.8 / openFrequency))
+        let delay = max(0.028, min(0.150, 4.5 / openFrequency))
         let workItem = DispatchWorkItem { [weak self] in
             self?.completeInitialAttack(stringIndex: stringIndex)
         }
