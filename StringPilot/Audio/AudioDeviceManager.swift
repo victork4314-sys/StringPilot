@@ -3,11 +3,6 @@ import Combine
 import CoreAudio
 import Foundation
 
-extension Notification.Name {
-    static let stringPilotInputDeviceChanged = Notification.Name("StringPilot.InputDeviceChanged")
-    static let stringPilotOutputDeviceChanged = Notification.Name("StringPilot.OutputDeviceChanged")
-}
-
 struct AudioDevice: Identifiable, Hashable {
     let id: AudioDeviceID
     let name: String
@@ -18,9 +13,9 @@ struct AudioDevice: Identifiable, Hashable {
 
 @MainActor
 final class AudioDeviceManager: ObservableObject {
-    @Published private(set) var devices: [AudioDevice] = []
     @Published private(set) var defaultInputID: AudioDeviceID = 0
     @Published private(set) var defaultOutputID: AudioDeviceID = 0
+    @Published private(set) var devices: [AudioDevice] = []
     @Published private(set) var errorMessage: String?
 
     init() {
@@ -49,26 +44,18 @@ final class AudioDeviceManager: ObservableObject {
         }
     }
 
-    func setDefaultInput(_ id: AudioDeviceID) throws {
+    func selectInput(_ id: AudioDeviceID) throws {
         guard devices.contains(where: { $0.id == id && $0.hasInput }) else {
             throw AudioDeviceError.invalidInput(id)
         }
         defaultInputID = id
-        NotificationCenter.default.post(
-            name: .stringPilotInputDeviceChanged,
-            object: NSNumber(value: id)
-        )
     }
 
-    func setDefaultOutput(_ id: AudioDeviceID) throws {
+    func selectOutput(_ id: AudioDeviceID) throws {
         guard devices.contains(where: { $0.id == id && $0.hasOutput }) else {
             throw AudioDeviceError.invalidOutput(id)
         }
         defaultOutputID = id
-        NotificationCenter.default.post(
-            name: .stringPilotOutputDeviceChanged,
-            object: NSNumber(value: id)
-        )
     }
 
     private static func readDevices() throws -> [AudioDevice] {
