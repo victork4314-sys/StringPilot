@@ -9,6 +9,7 @@ struct StringPilotApp: App {
         WindowGroup {
             ContentView(model: model)
                 .onAppear { model.start() }
+                .onDisappear { model.stop() }
         }
         .commands {
             CommandMenu("Performance") {
