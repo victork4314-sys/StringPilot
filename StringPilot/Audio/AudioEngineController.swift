@@ -22,6 +22,12 @@ final class AudioEngineController: ObservableObject {
         }
     }
 
+    private struct DetectionFocus {
+        let minimumFrequency: Double
+        let maximumFrequency: Double
+        let expiresAt: TimeInterval
+    }
+
     @Published private(set) var state: State = .stopped
     @Published private(set) var inputLevelDB: Double = -120
     @Published private(set) var latestPitch: DetectedPitch?
@@ -42,6 +48,7 @@ final class AudioEngineController: ObservableObject {
     private var analysisBuffer: [Float] = []
     private var lastAnalysisTime: TimeInterval = 0
     private var pitchDetector = YINPitchDetector()
+    private var detectionFocus: DetectionFocus?
     private var sensitivity: Double = 3
     private var noiseGateDB: Double = -58
     private var preferredInputDeviceID: AudioDeviceID?
@@ -59,6 +66,23 @@ final class AudioEngineController: ObservableObject {
     func selectDevices(inputID: AudioDeviceID, outputID: AudioDeviceID) {
         setPreferredDevices(inputID: inputID, outputID: outputID)
         restart()
+    }
+
+    func focusDetection(
+        minimumFrequency: Double,
+        maximumFrequency: Double,
+        duration: TimeInterval = 0.24
+    ) {
+        let minimum = max(20, min(minimumFrequency, maximumFrequency))
+        let maximum = max(minimum, max(minimumFrequency, maximumFrequency))
+        let focus = DetectionFocus(
+            minimumFrequency: minimum,
+            maximumFrequency: maximum,
+            expiresAt: ProcessInfo.processInfo.systemUptime + max(0.05, duration)
+        )
+        analysisQueue.async { [weak self] in
+            self?.detectionFocus = focus
+        }
     }
 
     func requestPermissionAndStart() async {
@@ -201,6 +225,7 @@ final class AudioEngineController: ObservableObject {
         analysisQueue.sync {
             analysisBuffer.removeAll(keepingCapacity: true)
             lastAnalysisTime = 0
+            detectionFocus = nil
         }
     }
 
@@ -286,13 +311,35 @@ final class AudioEngineController: ObservableObject {
         let db = 20 * log10(max(1e-8, rms))
         DispatchQueue.main.async { [weak self] in self?.inputLevelDB = db }
 
-        guard timestamp - lastAnalysisTime >= 0.025, analysisBuffer.count >= 4_096 else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if let focus = detectionFocus, now > focus.expiresAt {
+            detectionFocus = nil
+        }
+        let focus = detectionFocus
+        let analysisInterval = focus == nil ? 0.025 : 0.012
+        guard timestamp - lastAnalysisTime >= analysisInterval else { return }
+
+        let frameRequirement: Int
+        if let focus {
+            let cycles = 3.5
+            frameRequirement = max(
+                1_024,
+                min(maximumFrames, Int(ceil(sampleRate / focus.minimumFrequency * cycles)))
+            )
+        } else {
+            frameRequirement = 4_096
+        }
+        guard analysisBuffer.count >= frameRequirement else { return }
         lastAnalysisTime = timestamp
 
         var detector = pitchDetector
         detector.minimumRMS = pow(10, gateDB / 20)
+        if let focus {
+            detector.minimumFrequency = max(20, focus.minimumFrequency * 0.85)
+            detector.maximumFrequency = min(2_200, focus.maximumFrequency * 1.12)
+        }
         guard let pitch = detector.detect(
-            samples: Array(analysisBuffer.suffix(4_096)),
+            samples: Array(analysisBuffer.suffix(frameRequirement)),
             sampleRate: sampleRate,
             timestamp: timestamp
         ) else { return }
