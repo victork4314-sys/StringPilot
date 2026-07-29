@@ -93,17 +93,18 @@ Run the portable signal-engine tests:
 swift test
 ```
 
-Run the native macOS build and tests:
+Compile the complete native macOS application without launching its hardware-dependent runtime:
 
 ```bash
 xcodebuild \
   -project StringPilot.xcodeproj \
   -scheme StringPilot \
+  -configuration Debug \
   -destination 'platform=macOS' \
   CODE_SIGNING_ALLOWED=NO \
-  test
+  clean build
 ```
 
-The GitHub Actions workflow runs both checks on every push and pull request.
+The GitHub Actions workflow runs both checks on every push and pull request. Physical iRig, Xbox controller, instrument, and DAW checks follow `docs/HARDWARE_VALIDATION.md` because a hosted runner cannot manufacture those inputs.
 
 See `docs/ARCHITECTURE.md` and `docs/HARDWARE_VALIDATION.md` for the exact runtime pipeline and physical test matrix.
