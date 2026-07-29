@@ -25,6 +25,7 @@ final class AppModel: ObservableObject {
     private var captureStringIndex: Int?
     private var captureWindowEnds = Date.distantPast
     private var activeMIDINotes: [Int: Int] = [:]
+    private var lastSendMIDIEnabled: Bool
 
     var settings: AppSettings { settingsStore.settings }
 
@@ -35,11 +36,16 @@ final class AppModel: ObservableObject {
     static let directButtons: [XboxInput] = [.a, .b, .x, .y, .leftShoulder, .rightShoulder]
 
     init() {
+        lastSendMIDIEnabled = settingsStore.settings.sendMIDI
         resetStringStates()
         wireServices()
         settingsStore.$settings
             .sink { [weak self] settings in
                 guard let self else { return }
+                if self.lastSendMIDIEnabled && !settings.sendMIDI {
+                    self.stopActiveMIDINotes()
+                }
+                self.lastSendMIDIEnabled = settings.sendMIDI
                 self.audio.apply(settings: settings)
                 self.midi.selectedDestinationID = settings.midiDestinationUniqueID
                 self.objectWillChange.send()
@@ -53,15 +59,17 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
-        repeatScheduler.stopAll()
-        midi.allNotesOff()
+        stopPattern()
+        releaseHeldStrings()
+        stopActiveMIDINotes()
         audio.stop()
     }
 
     func selectProfile(id: String) {
         guard InstrumentProfile.all.contains(where: { $0.id == id }) else { return }
         stopPattern()
-        heldStrings.removeAll()
+        releaseHeldStrings()
+        stopActiveMIDINotes()
         settingsStore.settings.profileID = id
         resetStringStates()
     }
@@ -72,6 +80,9 @@ final class AppModel: ObservableObject {
         }
         if mode != .pattern { stopPattern() }
         settingsStore.settings.mode = mode
+        if mode == .tremolo {
+            heldStrings.forEach { startTremolo(stringIndex: $0) }
+        }
     }
 
     func cycleMode(_ direction: Int) {
@@ -152,6 +163,9 @@ final class AppModel: ObservableObject {
 
     func stopPattern() {
         repeatScheduler.stop(id: 10_000)
+        if isPatternPlaying {
+            stopActiveMIDINotes()
+        }
         isPatternPlaying = false
         patternStepIndex = 0
     }
@@ -162,6 +176,7 @@ final class AppModel: ObservableObject {
     }
 
     func selectMIDIDestination(_ id: MIDIUniqueID?) {
+        stopActiveMIDINotes()
         midi.selectedDestinationID = id
         settingsStore.settings.midiDestinationUniqueID = id
     }
@@ -197,6 +212,21 @@ final class AppModel: ObservableObject {
 
     private func resetStringStates() {
         stringStates = profile.strings.map(StringState.openState)
+    }
+
+    private func releaseHeldStrings() {
+        repeatScheduler.stopAll()
+        heldStrings.removeAll()
+        captureStringIndex = nil
+        captureWindowEnds = .distantPast
+        for index in stringStates.indices {
+            stringStates[index].isHeld = false
+        }
+    }
+
+    private func stopActiveMIDINotes() {
+        midi.allNotesOff()
+        activeMIDINotes.removeAll()
     }
 
     private func handlePitch(_ pitch: DetectedPitch) {
@@ -258,14 +288,17 @@ final class AppModel: ObservableObject {
         guard settings.sendMIDI else { return }
         if let old = activeMIDINotes[stringIndex] {
             midi.noteOff(note: old, channel: stringIndex)
+            midi.resetPitchBend(channel: stringIndex)
         }
         activeMIDINotes[stringIndex] = state.midiNote
+        midi.pitchBend(cents: state.centsOffset, channel: stringIndex)
         midi.noteOn(note: state.midiNote, velocity: Int(velocity * 127), channel: stringIndex)
 
         let gate = min(0.24, settings.subdivision.intervalSeconds(bpm: settings.bpm) * 0.78)
         DispatchQueue.main.asyncAfter(deadline: .now() + gate) { [weak self] in
             guard let self, self.activeMIDINotes[stringIndex] == state.midiNote else { return }
             self.midi.noteOff(note: state.midiNote, channel: stringIndex)
+            self.midi.resetPitchBend(channel: stringIndex)
             self.activeMIDINotes.removeValue(forKey: stringIndex)
         }
     }
