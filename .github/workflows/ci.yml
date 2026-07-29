@@ -1,0 +1,60 @@
+name: macOS CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stringpilot-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  signal-tests:
+    name: Signal engine tests
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+
+      - name: Show tool versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Run portable tests
+        run: swift test --parallel
+
+  native-build:
+    name: Native macOS app build
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16.4
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+
+      - name: Validate project and scheme
+        run: xcodebuild -list -project StringPilot.xcodeproj
+
+      - name: Build StringPilot
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project StringPilot.xcodeproj \
+            -scheme StringPilot \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/StringPilotDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
